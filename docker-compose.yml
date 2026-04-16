@@ -1,10 +1,41 @@
 version: '3.8'
 
-# CRITICAL: All containers must use network_mode: host
-# Docker bridge networking causes FreeSWITCH to advertise internal IPs
-# in SDP, making RTP unreachable from external callers.
+# CRITICAL: All containers use network_mode: host
+# Docker bridge networking causes FreeSWITCH to advertise internal Docker IPs
+# in SDP packets, making RTP audio unreachable from phones.
+# host networking means every container binds directly to the host NIC.
 
 services:
+
+  # ---------------------------------------------------------------------------
+  # Kamailio — SIP proxy + registrar (replaces 3CX Cloud)
+  # ---------------------------------------------------------------------------
+  # Softphones (Linphone, Zoiper, Bria) register HERE on port 5060.
+  # When a softphone dials an AI extension (9000, 9002, …), Kamailio
+  # proxies the INVITE to drachtio on port 5070.
+  # ---------------------------------------------------------------------------
+  kamailio:
+    build: ./kamailio
+    container_name: kamailio
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - EXTERNAL_IP=${EXTERNAL_IP}
+      - SIP_DOMAIN=${SIP_DOMAIN:-pbx.local}
+      - KAM_REALM=${KAM_REALM:-${SIP_DOMAIN:-pbx.local}}
+    volumes:
+      # Read-only SIP config — edit kamailio/kamailio.cfg to change routing
+      - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
+      # Persistent subscriber DB (softphone credentials + registered contacts)
+      # Created automatically on first start if empty
+      - ./kamailio/subscriber.db:/etc/kamailio/subscriber.db
+    # Ports (reference only — host mode doesn't need port mapping):
+    # - 5060 UDP/TCP : SIP signaling (softphones register and call here)
+
+  # ---------------------------------------------------------------------------
+  # drachtio — SIP application server
+  # Moved from :5060 to :5070 so Kamailio can own the standard SIP port.
+  # ---------------------------------------------------------------------------
   drachtio:
     image: drachtio/drachtio-server:latest
     container_name: drachtio
@@ -12,15 +43,19 @@ services:
     network_mode: host
     command: >
       drachtio
-      --contact "sip:*:5060;transport=tcp,udp"
+      --contact "sip:*:5070;transport=tcp,udp"
       --external-ip ${EXTERNAL_IP}
       --secret ${DRACHTIO_SECRET:-cymru}
       --port 9022
       --loglevel info
-    # Ports (for reference - host mode doesn't need port mapping):
-    # - 5060: SIP UDP/TCP
-    # - 9022: Admin/App Port
+    # Ports (reference only):
+    # - 5070: SIP (receives INVITEs forwarded by Kamailio)
+    # - 9022: Admin port (voice-app connects here via drachtio-srf)
 
+  # ---------------------------------------------------------------------------
+  # FreeSWITCH — RTP media server (handles audio streams)
+  # Unchanged from original — still handles codec negotiation and RTP.
+  # ---------------------------------------------------------------------------
   freeswitch:
     image: drachtio/drachtio-freeswitch-mrf:latest
     container_name: freeswitch
@@ -35,15 +70,17 @@ services:
       --ext-sip-ip ${EXTERNAL_IP}
       --advertise-external-ip
     environment:
-      # CRITICAL: Set this to your server's LAN IP
-      # This IP goes into SDP packets so 3CX knows where to send audio
-      # Note: drachtio-freeswitch-mrf only accepts CLI flags, not env vars
       - EXTERNAL_IP=${EXTERNAL_IP}
-    # Ports (for reference):
-    # - 8021: ESL (Event Socket Library)
-    # - 5080: Internal SIP
-    # - 30000-30100: RTP Audio (changed from 20000-20100 to avoid conflict with 3CX SBC)
+    # Ports (reference only):
+    # - 8021       : ESL (Event Socket Library) — voice-app connects here
+    # - 5080       : Internal SIP (drachtio B2BUA communicates here)
+    # - 30000-30100: RTP audio streams
 
+  # ---------------------------------------------------------------------------
+  # voice-app — Node.js orchestrator
+  # Connects to drachtio (admin 9022) and FreeSWITCH (ESL 8021).
+  # Runs the conversation loop: Whisper STT → Claude → ElevenLabs TTS.
+  # ---------------------------------------------------------------------------
   voice-app:
     build: ./voice-app
     container_name: voice-app
@@ -52,13 +89,20 @@ services:
     env_file:
       - .env
     volumes:
-      # Audio files directory for TTS playback
       - ./voice-app/audio:/app/audio
-      # Device configurations
       - ./voice-app/config:/app/config
     depends_on:
+      - kamailio
       - drachtio
       - freeswitch
-    # Ports (for reference):
-    # - 3000: HTTP API
-    # - 3001: WebSocket for audio streaming
+    # Ports (reference only):
+    # - 3000: HTTP (static audio files + outbound/query APIs)
+    # - 3001: WebSocket (real-time audio fork from FreeSWITCH)
+
+  # NOTE: claude-api-server runs NATIVELY on the host (not in Docker)
+  # so the `claude` CLI binary and ~/.claude credentials are accessible.
+  #
+  # Start it with:  cd claude-api-server && node server.js
+  #
+  # The server strips ANTHROPIC_API_KEY from the subprocess env so the
+  # Claude Code CLI falls back to Claude Pro/Max subscription auth.

@@ -21,7 +21,7 @@ var ttsService = require("./lib/tts-service");
 
 // Multi-extension support
 var deviceRegistry = require("./lib/device-registry");
-var MultiRegistrar = require("./lib/multi-registrar");
+// NOTE: MultiRegistrar removed — Kamailio handles SIP registration now.
 
 // Connection retry utility
 var connectionRetry = require("./lib/connection-retry");
@@ -53,13 +53,8 @@ var config = {
     secret: process.env.FREESWITCH_SECRET || "JambonzR0ck$"
   },
   sip: {
-    extension: process.env.SIP_EXTENSION || "9000",
-    auth_id: process.env.SIP_AUTH_ID || "Au0XZPTpJY",
-    password: process.env.SIP_AUTH_PASSWORD || "DGHwMW6v25",
-    domain: process.env.SIP_DOMAIN || "hello.networkchuck.com",
-    registrar: process.env.SIP_REGISTRAR || "hello.networkchuck.com",
-    registrar_port: parseInt(process.env.SIP_REGISTRAR_PORT) || 5060,
-    expiry: parseInt(process.env.SIP_EXPIRY) || 3600
+    // SIP domain served by the local Kamailio instance
+    domain: process.env.SIP_DOMAIN || "pbx.local"
   },
   external_ip: process.env.EXTERNAL_IP || "10.70.7.81",
   http_port: parseInt(process.env.HTTP_PORT) || 3000,
@@ -72,7 +67,6 @@ var srf = new Srf();
 var mediaServer = null;
 var httpServer = null;
 var audioForkServer = null;
-var registrar = null;
 var drachtioConnected = false;
 var freeswitchConnected = false;
 var isReady = false;
@@ -85,8 +79,7 @@ console.log("=".repeat(64));
 console.log("\nConfiguration:");
 console.log("  - drachtio:    " + config.drachtio.host + ":" + config.drachtio.port);
 console.log("  - FreeSWITCH:  " + config.freeswitch.host + ":" + config.freeswitch.port);
-console.log("  - SIP Domain:  " + config.sip.domain);
-console.log("  - Registrar:   " + config.sip.registrar + ":" + config.sip.registrar_port);
+console.log("  - SIP Domain:  " + config.sip.domain + " (served by local Kamailio on :5060)");
 console.log("  - External IP: " + config.external_ip);
 console.log("  - HTTP Port:   " + config.http_port);
 console.log("  - WS Port:     " + config.ws_port);
@@ -106,27 +99,7 @@ srf.on("connect", function(err, hostport) {
   console.log("[" + new Date().toISOString() + "] DRACHTIO Connected at " + hostport);
   drachtioConnected = true;
 
-  var localAddress = config.external_ip;
-  if (hostport && hostport.length > 0) {
-    var match = hostport[0].match(/\/([^:]+)/);
-    if (match) localAddress = match[1];
-  }
-  console.log("[DRACHTIO] Local SIP address: " + localAddress);
-
-  // Start Multi-Registration for all devices
-  if (!registrar) {
-    registrar = new MultiRegistrar(srf, {
-      domain: config.sip.domain,
-      registrar: config.sip.registrar,
-      registrar_port: config.sip.registrar_port,
-      local_address: localAddress,
-      local_port: parseInt(process.env.DRACHTIO_SIP_PORT) || 5060,
-      expiry: config.sip.expiry
-    });
-
-    // Register all devices from config
-    registrar.registerAll(deviceRegistry.getRegistrationConfigs());
-  }
+  console.log("[DRACHTIO] Listening on :5070 — Kamailio proxies AI extension calls here");
 
   checkReadyState();
 });
@@ -261,7 +234,6 @@ function checkReadyState() {
 // Graceful shutdown
 function shutdown(signal) {
   console.log("\n[" + new Date().toISOString() + "] Received " + signal + ", shutting down...");
-  if (registrar) registrar.stop();
   if (httpServer) httpServer.close();
   if (audioForkServer) audioForkServer.stop();
   if (mediaServer) mediaServer.disconnect();

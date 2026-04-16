@@ -52,60 +52,38 @@ async function initiateOutboundCall(srf, mediaServer, options) {
     // Get local SDP from FreeSWITCH
     const localSdp = endpoint.local.sdp;
 
-    // Format SIP URI for 3CX
-    // Remove '+' from E.164 format for SIP URI
-    // Internal extensions: dial as-is. External (E.164 with +): add 9 prefix for PSTN
-    const isExternal = to.startsWith('+');
-    const phoneNumber = isExternal ? '9' + to.replace(/^\+1?/, '') : to;
-    const sipTrunkHost = process.env.SIP_TRUNK_HOST || '10.70.7.50';
-    const externalIp = process.env.EXTERNAL_IP || '10.70.7.81';
-    const defaultCallerId = callerId || process.env.DEFAULT_CALLER_ID || '+15551234567';
+    // Route outbound calls through Kamailio (self-hosted SIP registrar on :5060)
+    // Strip leading '+' if present — Kamailio handles internal extensions directly
+    const phoneNumber = to.replace(/^\+/, '');
+    const sipRegistrar = process.env.SIP_REGISTRAR || '127.0.0.1:5060';
+    const sipDomain    = process.env.SIP_DOMAIN    || 'pbx.local';
+    const defaultCallerId = callerId || process.env.DEFAULT_CALLER_ID || 'claude-phone';
 
-    // SIP Authentication for 3CX extension registration
-    const sipAuthUsername = process.env.SIP_AUTH_USERNAME;
-    const sipAuthPassword = process.env.SIP_AUTH_PASSWORD;
-
-    const sipUri = 'sip:' + phoneNumber + '@' + sipTrunkHost;
+    const sipUri = 'sip:' + phoneNumber + '@' + sipRegistrar;
 
     logger.info('Dialing SIP URI', {
       callId,
       sipUri,
-      from: defaultCallerId,
-      hasAuth: !!(sipAuthUsername && sipAuthPassword)
+      from: defaultCallerId
     });
 
     // STEP 2: Create UAC (outbound call) with Early Offer
-    // Use device extension and display name if available, otherwise fall back to callerId
-    const fromExtension = deviceConfig ? deviceConfig.extension : defaultCallerId.replace('+', '');
-    const displayName = deviceConfig ? deviceConfig.name : null;
-    const fromHeader = displayName
-      ? '"' + displayName + '" <sip:' + fromExtension + '@' + sipTrunkHost + '>'
-      : '<sip:' + fromExtension + '@' + sipTrunkHost + '>';
+    // Build From header using device extension/name if available
+    const fromExtension = deviceConfig ? deviceConfig.extension : defaultCallerId;
+    const displayName   = deviceConfig ? deviceConfig.name : null;
+    const fromHeader    = displayName
+      ? '"' + displayName + '" <sip:' + fromExtension + '@' + sipDomain + '>'
+      : '<sip:' + fromExtension + '@' + sipDomain + '>';
 
     const uacOptions = {
       localSdp: localSdp,
       headers: {
-        'From': fromHeader,
-        'User-Agent': 'NetworkChuck-VoiceServer/1.0',
-        'X-Call-ID': callId
+        'From':       fromHeader,
+        'User-Agent': 'ClaudePhone/1.0',
+        'X-Call-ID':  callId
       }
     };
-
-    // Add SIP authentication - prefer device credentials, fall back to env vars
-    const authUsername = deviceConfig ? deviceConfig.authId : sipAuthUsername;
-    const authPassword = deviceConfig ? deviceConfig.password : sipAuthPassword;
-
-    if (authUsername && authPassword) {
-      uacOptions.auth = {
-        username: authUsername,
-        password: authPassword
-      };
-      logger.info('SIP authentication enabled', {
-        callId,
-        username: authUsername,
-        device: deviceConfig ? deviceConfig.name : 'default'
-      });
-    }
+    // No SIP auth needed for outbound: Kamailio trusts calls from 127.0.0.1 (localhost)
 
     let isRinging = false;
     let callAnswered = false;
