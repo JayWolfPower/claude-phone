@@ -49,3 +49,8 @@ temp/
 !assets/*.png
 !assets/*.jpg
 voice-app/config/devices.json
+
+# Kamailio — subscriber DB contains credentials, keep out of git
+# kamailio/subscriber.db is committed as an empty placeholder only
+# The real DB is populated at runtime by docker-entrypoint.sh
+kamailio/kamailio-local.cfg

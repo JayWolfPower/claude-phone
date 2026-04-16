@@ -6,11 +6,12 @@
  *
  * Each device has:
  * - name: Human-readable identifier (e.g., "Cephanie", "Morpheus")
- * - extension: SIP extension number (e.g., "9002")
- * - authId: 3CX authentication ID for SIP REGISTER
- * - password: 3CX authentication password
+ * - extension: SIP extension number (e.g., "9002")  ← registered in Kamailio
  * - voiceId: ElevenLabs voice ID for TTS
  * - prompt: System prompt that defines device personality
+ *
+ * NOTE: authId / password fields are legacy 3CX fields and are no longer used
+ * for SIP registration.  Kamailio manages registrations directly.
  */
 
 const fs = require('fs');

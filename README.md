@@ -2,231 +2,254 @@
   <img src="assets/logo.png" alt="Claude Phone" width="200">
 </p>
 
-# Claude Phone
+# Claude Phone — Self-Hosted (Kamailio)
 
-Voice interface for Claude Code via SIP/3CX. Call your AI, and your AI can call you.
+Voice interface for Claude Code using a fully self-hosted SIP stack. Call your AI, and your AI can call you — no cloud PBX required.
 
 ## What is this?
 
 Claude Phone gives your Claude Code installation a phone number. You can:
 
-- **Inbound**: Call an extension and talk to Claude - run commands, check status, ask questions
-- **Outbound**: Your server can call YOU with alerts, then have a conversation about what to do
+- **Inbound**: Call an extension and talk to Claude — run commands, check server status, ask questions
+- **Outbound**: Your server can call YOU with alerts, then hold a full conversation about what to do
+- **Multi-extension**: Each SIP extension gets its own AI personality, name, and voice
+
+## How it works
+
+```
+Softphone (Linphone / Zoiper / Bria)
+        │  REGISTER / INVITE  (SIP :5060)
+        ▼
+  ┌─────────────────────────────────────────────────────────┐
+  │  HOST NETWORK (all containers bind to the real NIC)     │
+  │                                                         │
+  │  [KAMAILIO :5060]  ──INVITE──►  [DRACHTIO :5070]       │
+  │   SIP registrar + proxy          SIP application server │
+  │                                         │               │
+  │                                  [FREESWITCH :5080]     │
+  │                                   RTP 30000–30100       │
+  │                                         │               │
+  │                                  [VOICE-APP :3000]      │
+  │                                   Node.js orchestrator  │
+  └─────────────────────────────────────────────────────────┘
+                                            │  HTTP
+                               [CLAUDE-API-SERVER :3333]
+                                Native Node.js on host
+                                (spawns `claude` CLI)
+                                            │
+                                   Claude Pro / Max subscription
+```
+
+**Port layout**
+
+| Service | Port | Role |
+|---|---|---|
+| Kamailio | 5060 UDP/TCP | SIP registrar + proxy |
+| drachtio | 5070 UDP | SIP app server (AI call handler) |
+| FreeSWITCH | 5080 / 30000–30100 | RTP media |
+| voice-app | 3000 HTTP / 3001 WS | API + audio fork |
+| claude-api-server | 3333 HTTP | Claude CLI wrapper (runs natively) |
 
 ## Prerequisites
 
-| Requirement | Where to Get It | Notes |
-|-------------|-----------------|-------|
-| **3CX Cloud Account** | [3cx.com](https://www.3cx.com/) | Free tier works |
-| **ElevenLabs API Key** | [elevenlabs.io](https://elevenlabs.io/) | For text-to-speech |
-| **OpenAI API Key** | [platform.openai.com](https://platform.openai.com/) | For Whisper speech-to-text |
-| **Claude Code CLI** | [claude.ai/code](https://claude.ai/code) | Requires Claude Max subscription |
+| Requirement | Notes |
+|---|---|
+| **Docker + Docker Compose** | v2.x or later |
+| **Node.js 18+** | For `claude-api-server` (runs natively) |
+| **Claude Code CLI** (`claude`) | `npm i -g @anthropic-ai/claude-code` — Claude Pro or Max subscription |
+| **ElevenLabs API key** | Text-to-speech |
+| **OpenAI API key** | Whisper speech-to-text |
+| **A SIP softphone** | Linphone, Zoiper, or Bria to place / receive calls |
 
 ## Platform Support
 
 | Platform | Status |
-|----------|--------|
-| **macOS** | Fully supported |
-| **Linux** | Fully supported (including Raspberry Pi) |
-| **Windows** | Not supported (may work with WSL) |
+|---|---|
+| **macOS** | ✅ Fully supported |
+| **Linux (x86-64)** | ✅ Fully supported |
+| **Raspberry Pi (arm64 / armv7)** | ✅ Supported — Kamailio image is multi-arch |
+| **Windows** | ❌ Not supported (may work under WSL) |
+
+---
 
 ## Quick Start
 
-### 1. Install
+### 1. Clone and configure
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/theNetworkChuck/claude-phone/main/install.sh | bash
+git clone https://github.com/JayWolfPower/claude-phone.git
+cd claude-phone
+cp .env.example .env
 ```
 
-The installer will:
-- Check for Node.js 18+, Docker, and git (offers to install if missing)
-- Clone the repository to `~/.claude-phone-cli`
-- Install dependencies
-- Create the `claude-phone` command
-
-### 2. Setup
+Open `.env` and set at minimum:
 
 ```bash
-claude-phone setup
+EXTERNAL_IP=192.168.1.100   # your server's LAN IP
+SIP_DOMAIN=pbx.local        # domain softphones register under
+OPENAI_API_KEY=sk-...
+ELEVENLABS_API_KEY=...
 ```
 
-The setup wizard asks what you're installing:
-
-| Type | Use Case | What It Configures |
-|------|----------|-------------------|
-| **Voice Server** | Pi or dedicated voice box | Docker containers, connects to remote API server |
-| **API Server** | Mac/Linux with Claude Code | Just the Claude API wrapper |
-| **Both** | All-in-one single machine | Everything on one box |
-
-### 3. Start
+### 2. Start the Docker stack
 
 ```bash
-claude-phone start
+docker compose up -d
 ```
 
-## Deployment Modes
+First run builds the Kamailio image (~2 min). Subsequent starts are instant.
 
-### All-in-One (Single Machine)
+Verify everything is up:
 
-Best for: Mac or Linux server that's always on and has Claude Code installed.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Your Phone                                                  │
-│      │                                                       │
-│      ↓ Call extension 9000                                  │
-│  ┌─────────────┐                                            │
-│  │     3CX     │  ← Cloud PBX                               │
-│  └──────┬──────┘                                            │
-│         │                                                    │
-│         ↓                                                    │
-│  ┌─────────────────────────────────────────────┐           │
-│  │     Single Server (Mac/Linux)                │           │
-│  │  ┌───────────┐    ┌───────────────────┐    │           │
-│  │  │ voice-app │ ←→ │ claude-api-server │    │           │
-│  │  │ (Docker)  │    │ (Claude Code CLI) │    │           │
-│  │  └───────────┘    └───────────────────┘    │           │
-│  └─────────────────────────────────────────────┘           │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Setup:**
 ```bash
-claude-phone setup    # Select "Both"
-claude-phone start    # Launches Docker + API server
+docker compose ps
+docker compose logs kamailio | grep "Starting Kamailio"
+docker compose logs drachtio  | grep "listening"
 ```
 
-### Split Mode (Pi + API Server)
+### 3. Add a softphone user
 
-Best for: Dedicated Pi for voice services, Claude running on your main machine.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Your Phone                                                  │
-│      │                                                       │
-│      ↓ Call extension 9000                                  │
-│  ┌─────────────┐                                            │
-│  │     3CX     │  ← Cloud PBX                               │
-│  └──────┬──────┘                                            │
-│         │                                                    │
-│         ↓                                                    │
-│  ┌─────────────┐         ┌─────────────────────┐           │
-│  │ Raspberry Pi │   ←→   │ Mac/Linux with      │           │
-│  │ (voice-app)  │  HTTP  │ Claude Code CLI     │           │
-│  └─────────────┘         │ (claude-api-server) │           │
-│                          └─────────────────────┘           │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**On your Pi (Voice Server):**
 ```bash
-claude-phone setup    # Select "Voice Server", enter API server IP when prompted
-claude-phone start    # Launches Docker containers
+./kamailio/init-db.sh alice secretpass
 ```
 
-**On your Mac/Linux (API Server):**
+This calls `kamctl add` inside the Kamailio container and prints softphone config instructions.
+
+### 4. Start the Claude bridge (natively)
+
 ```bash
-claude-phone api-server    # Starts Claude API wrapper on port 3333
+cd claude-api-server && node server.js
 ```
 
-Note: On the API server machine, you don't need to run `claude-phone setup` first - the `api-server` command works standalone.
+This wraps the `claude` CLI in an HTTP server on port 3333. It must run natively (not in Docker) so it can reach the `claude` binary and `~/.claude` credentials. No `ANTHROPIC_API_KEY` needed — it uses your Claude Pro / Max subscription.
 
-## CLI Commands
+### 5. Configure your softphone
 
-| Command | Description |
-|---------|-------------|
-| `claude-phone setup` | Interactive configuration wizard |
-| `claude-phone start` | Start services based on installation type |
-| `claude-phone stop` | Stop all services |
-| `claude-phone status` | Show service status |
-| `claude-phone doctor` | Health check for dependencies and services |
-| `claude-phone api-server [--port N]` | Start API server standalone (default: 3333) |
-| `claude-phone device add` | Add a new device/extension |
-| `claude-phone device list` | List configured devices |
-| `claude-phone device remove <name>` | Remove a device |
-| `claude-phone logs [service]` | Tail logs (voice-app, drachtio, freeswitch) |
-| `claude-phone config show` | Display configuration (secrets redacted) |
-| `claude-phone config path` | Show config file location |
-| `claude-phone config reset` | Reset configuration |
-| `claude-phone backup` | Create configuration backup |
-| `claude-phone restore` | Restore from backup |
-| `claude-phone update` | Update Claude Phone |
-| `claude-phone uninstall` | Complete removal |
+| Field | Value |
+|---|---|
+| SIP server / registrar | `EXTERNAL_IP` (from your `.env`) |
+| Port | `5060` |
+| Username | `alice` (or whatever you passed to `init-db.sh`) |
+| Password | `secretpass` |
+| Domain / realm | `pbx.local` (your `SIP_DOMAIN`) |
+
+Dial `9000` → Claude answers.
+
+---
 
 ## Device Personalities
 
-Each SIP extension can have its own identity with a unique name, voice, and personality prompt:
+Each SIP extension can have its own AI name, voice, and system prompt. Edit `voice-app/config/devices.json` (copy from `devices.json.example`):
 
-```bash
-claude-phone device add
+```json
+{
+  "9000": {
+    "name": "Morpheus",
+    "extension": "9000",
+    "voiceId": "JAgnJveGGUh4qy4kh6dF",
+    "prompt": "You are Morpheus. Keep voice responses under 40 words."
+  },
+  "9002": {
+    "name": "Cephanie",
+    "extension": "9002",
+    "voiceId": "your-elevenlabs-voice-id",
+    "prompt": "You are Cephanie, a storage monitoring bot."
+  }
+}
 ```
 
-Example devices:
-- **Morpheus** (ext 9000) - General assistant
-- **Cephanie** (ext 9002) - Storage monitoring bot
+Kamailio routes any four-digit extension starting with `9` (regex `^9[0-9]{3}$`) to drachtio. To change the pattern, edit `AI_EXT_REGEX` in `kamailio/kamailio.cfg` (the define is regenerated by the entrypoint from `kamailio-local.cfg`).
+
+---
+
+## Kamailio SIP users
+
+Add users with the helper script:
+
+```bash
+./kamailio/init-db.sh <username> <password>
+```
+
+Or directly via `kamctl`:
+
+```bash
+docker compose exec kamailio kamctl add alice secretpass
+docker compose exec kamailio kamctl ul show   # verify registrations
+```
+
+---
 
 ## API Endpoints
 
 The voice-app exposes these endpoints on port 3000:
 
 | Method | Endpoint | Purpose |
-|--------|----------|---------|
-| POST | `/api/outbound-call` | Initiate an outbound call |
+|---|---|---|
+| POST | `/api/outbound-call` | Initiate an outbound call to a registered extension |
 | GET | `/api/call/:callId` | Get call status |
 | GET | `/api/calls` | List active calls |
-| POST | `/api/query` | Query a device programmatically |
-| GET | `/api/devices` | List configured devices |
+| POST | `/api/query` | Query Claude programmatically (no phone call) |
+| GET | `/api/devices` | List configured device extensions |
 
-See [Outbound API Reference](voice-app/README-OUTBOUND.md) for details.
+See [Outbound API Reference](voice-app/README-OUTBOUND.md) for request/response details.
+
+---
 
 ## Troubleshooting
 
-### Quick Diagnostics
+| Problem | Likely Cause | Fix |
+|---|---|---|
+| Calls connect but no audio | Wrong `EXTERNAL_IP` | Check `.env`, ensure it's your LAN IP, restart stack |
+| Softphone shows "Registration failed" | Wrong SIP_DOMAIN or credentials | Re-run `init-db.sh`; verify domain matches `.env` |
+| `docker compose logs kamailio` shows DB errors | subscriber.db not initialized | Restart container — entrypoint auto-inits the DB |
+| "Sorry, something went wrong" during call | claude-api-server not running | `cd claude-api-server && node server.js` |
+| `claude: command not found` in api-server | Claude Code CLI not installed | `npm i -g @anthropic-ai/claude-code` then `claude login` |
+| Port 5060 already in use | Another SIP service on the host | Stop it or change `KAMAILIO_PORT` in docker-compose.yml |
+
+View live logs:
 
 ```bash
-claude-phone doctor    # Automated health checks
-claude-phone status    # Service status
-claude-phone logs      # View logs
+docker compose logs -f kamailio    # SIP registration / routing
+docker compose logs -f drachtio    # SIP app server
+docker compose logs -f voice-app   # conversation loop
+docker compose logs -f freeswitch  # RTP media
 ```
 
-### Common Issues
+---
 
-| Problem | Likely Cause | Solution |
-|---------|--------------|----------|
-| Calls connect but no audio | Wrong external IP | Re-run `claude-phone setup`, verify LAN IP |
-| Extension not registering | 3CX SBC not running | Check 3CX admin panel |
-| "Sorry, something went wrong" | API server unreachable | Check `claude-phone status` |
-| Port conflict on startup | 3CX SBC using port 5060 | Setup auto-detects this; re-run setup |
+## Configuration reference
 
-See [Troubleshooting Guide](docs/TROUBLESHOOTING.md) for more.
+| Variable | Default | Description |
+|---|---|---|
+| `EXTERNAL_IP` | — | Host LAN IP — goes into SDP so phones find the RTP stream |
+| `SIP_DOMAIN` | `pbx.local` | Kamailio realm; softphones use this as their domain |
+| `KAM_REALM` | `= SIP_DOMAIN` | Digest auth realm (usually same as SIP_DOMAIN) |
+| `SIP_REGISTRAR` | `127.0.0.1:5060` | Where voice-app sends outbound INVITEs |
+| `DRACHTIO_SECRET` | `cymru` | Shared secret between voice-app and drachtio |
+| `FREESWITCH_SECRET` | `JambonzR0ck$` | ESL password |
+| `ELEVENLABS_API_KEY` | — | TTS |
+| `OPENAI_API_KEY` | — | Whisper STT |
+| `CLAUDE_API_URL` | `http://127.0.0.1:3333` | URL of the claude-api-server |
 
-## Configuration
-
-Configuration is stored in `~/.claude-phone/config.json` with restricted permissions (chmod 600).
-
-```bash
-claude-phone config show    # View config (secrets redacted)
-claude-phone config path    # Show file location
-```
+---
 
 ## Development
 
 ```bash
-# Run tests
-npm test
-
-# Lint
-npm run lint
+npm test        # run tests
+npm run lint    # lint
 npm run lint:fix
 ```
 
+---
+
 ## Documentation
 
-- [CLI Reference](cli/README.md) - Detailed CLI documentation
-- [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues and solutions
-- [Outbound API](voice-app/README-OUTBOUND.md) - Outbound calling API reference
-- [Deployment](voice-app/DEPLOYMENT.md) - Production deployment guide
-- [Claude Code Skill](docs/CLAUDE-CODE-SKILL.md) - Build a "call me" skill for Claude Code
+- [Outbound API](voice-app/README-OUTBOUND.md) — outbound calling reference
+- [Deployment](voice-app/DEPLOYMENT.md) — production deployment notes
+- [Claude Code Skill](docs/CLAUDE-CODE-SKILL.md) — build a "call me" skill for Claude Code
+
+---
 
 ## License
 
